@@ -1,44 +1,99 @@
 import Ember from 'ember';
-import jQuery from 'jquery';
-
-const {
-  ajax
-} = jQuery;
+import { task, drop } from 'ember-concurrency';
+import fetch from 'ember-network/fetch';
 
 const {
   Evented,
-  RSVP,
   Service,
-  computed,
-  run
+  computed
 } = Ember;
 
-const {
-  Promise
-} = RSVP;
-
 const INITIAL_PING_DEBOUNCE = 36;
-const MAX_PING_DEBOUNCE = 1000 * 60 * 15;// 15min
+const INITIAL_HEALTH_DEBOUNCE = 60000; // 1min
+const INITIAL_PING_DECAY = 1.1;
+const MAX_PING_DEBOUNCE = 1000 * 60 * 15; // 15min
 
+function watchType(options) {
+  return task(drop, function * () {
+    while (true) {
+      if (this.get('monitor') && this.get('isConnected') && !this.get(options.bool)) {
+        yield fetch(this.get(options.url))
+          .then(() => {
+            this.set(options.bool, true);
+            this.set(options.failures, 0);
+          })
+          .catch(() => {
+            this.set(options.bool, false);
+            this.incrementProperty(options.failures);
+          });
+      }
+
+      if (!this.get(options.bool)) {
+        yield timeout(this._decay(this.get(options.failures)));
+      } else {
+        yield timeout(this.get('healthCheckDebounce'));
+      }
+    }
+  }).on('init');
+}
 
 export default Service.extend(Evented, {
-  isOnline: true,
-  isOffline: computed.not('isOnline'),
 
-  // can be true even if we're actually online, kind of like airplane mode
-  isOfflineMode: false,
-
-  // failures represent both failures of pings and other
-  // reported failures
-  recentFailures: 0,
-
-  // once this fail count is exceeded, `isOfflineMode` will be
-  // entered automatically.  OfflineMode is not programmatically
-  // disabled.
-  maxFailuresBeforeOfflineMode: 10,
-
+  // ------- user configurable settings
   pingDebounce: INITIAL_PING_DEBOUNCE,
-  pingDebounceDecay: 1.1,
+  maxPingDebounce: MAX_PING_DEBOUNCE,
+  pingDebounceDecay: INITIAL_PING_DECAY,
+  healthCheckDebounce: INITIAL_HEALTH_DEBOUNCE,
+
+  // the service url is something on your site
+  // pinging this should let you know whether your own
+  // site is currently functioning correctly
+  serviceUrl: null,
+
+  // the network url is a trusted url someplace else
+  // it often needs to be http
+  // http://google.com is a decent choice
+  networkUrl: null,
+
+  // -------- status checks
+  // whether the network is online or offline
+  networkIsOnline: true,
+  networkIsOffline: computed.not('networkIsOnline'),
+
+  // whether the service is online or offline
+  serviceIsOnline: true,
+  serviceIsOffline: computed.not('serviceIsOnline'),
+
+  // whether we've forces a disconnect or not
+  // kind of like airplane mode
+  isDisconnected: false,
+  isConnected: computed.not('isDisconnected'),
+
+  // -------- whether we should be monitoring
+  monitor: false,
+
+  disconnect() {
+    this.set('isDisconnected', true);
+  },
+
+  connect() {
+    this.set('isDisconnected', false);
+  },
+
+  _networkFailures: 0,
+  watchNetwork: watchType({
+    bool: 'networkIsOnline',
+    url: 'networkUrl',
+    failures: '_networkFailures'
+  }),
+
+  _serviceFailures: 0,
+  watchService: watchType({
+    bool: 'serviceIsOnline',
+    url: 'serviceUrl',
+    failures: '_serviceFailures'
+  }),
+
   networkPingUrl: 'http://google.com',
   _lastNetworkPing: null,
   _nextPingAttempt: null,
@@ -46,91 +101,13 @@ export default Service.extend(Evented, {
   // with 36ms start and 1.1 decay the first 100 requests take 90min
   // and at request 107 we hit our peak (15min between requests)
   // http://www.wolframalpha.com/input/?i=sum+%28.0006+*+1.1+%5E+n%29+from+1+to+100
-  _decayPingDebounce() {
+  _decay(count) {
     let debounce = this.get('pingDebounce');
     let decay = this.get('pingDebounceDecay');
-    this.set('pingDebounce', Math.min(debounce * decay, MAX_PING_DEBOUNCE));
-  },
+    let max = this.get('maxPingDebounce');
+    let currentDebounce = debounce * Math.pow(decay, count);
 
-  _pingUrl(src) {
-    return new Promise((resolve, reject) => {
-      ajax({
-        method: 'get',
-        url: src,
-        success: resolve,
-        error: reject
-      });
-    });
-  },
-
-  setOnline() {
-    run.cancel(this._nextPingAttempt);
-
-    this.setProperties({
-      isOnline: true,
-      recentFailures: 0,
-      pingDebounce: INITIAL_PING_DEBOUNCE
-    });
-  },
-
-  setOffline() {
-    this.set('isOnline', false);
-  },
-
-  _pingNetwork() {
-    const src = this.get('networkPingUrl');
-
-    if (this._lastNetworkPing && this._lastNetworkPing._state === 'pending') {
-      return this._lastNetworkPing;
-    }
-
-    this._lastNetworkPing = this._pingUrl(src).then(() => {
-      this.setOnline();
-      this.trigger('networkAvailable');
-    }).catch(() => {
-      this.setOffline();
-      this.incrementProperty('recentFailures');
-
-      const recentFailures = this.get('recentFailures');
-      const maxFailures = this.get('maxFailuresBeforeOfflineMode');
-
-      // go into offline mode if we've failed too many times
-      if (recentFailures >= maxFailures &&
-        this.get('isOfflineMode') === false) {
-
-        this.set('isOfflineMode', true);
-        this.trigger('appOffline');
-      }
-
-      this.trigger('networkUnavailable');
-      this._decayPingDebounce();
-      this.pingNetwork();
-    });
-
-    return this._lastNetworkPing;
-  },
-
-  pingNetwork() {
-    this._nextPingAttempt =
-      run.debounce(this, this._pingNetwork, this.get('pingDebounce'));
-  },
-
-  networkRequestFailure() {
-    this.incrementProperty('recentFailures');
-    this.setOffline();
-    this.pingNetwork();
-  },
-
-  networkRequestSuccess() {
-    this.setOnline();
-  },
-
-  // isOfflineMode can only be turned off explicitly
-  goOnline() {
-    this.set('isOfflineMode', false);
-
-    if (this.get('isOnline')) {
-      this.trigger('appOnline');
-    }
+    return Math.min(currentDebounce, max);
   }
+
 });
