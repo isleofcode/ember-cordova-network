@@ -94,10 +94,6 @@ export default Service.extend(Evented, {
     failures: '_serviceFailures'
   }),
 
-  networkPingUrl: 'http://google.com',
-  _lastNetworkPing: null,
-  _nextPingAttempt: null,
-
   // with 36ms start and 1.1 decay the first 100 requests take 90min
   // and at request 107 we hit our peak (15min between requests)
   // http://www.wolframalpha.com/input/?i=sum+%28.0006+*+1.1+%5E+n%29+from+1+to+100
