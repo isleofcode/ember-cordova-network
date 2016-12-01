@@ -10,13 +10,10 @@ module.exports = {
   afterInstall: function() {
     var checker = new VersionChecker(this);
     var dep = checker.for('ember-platform-cordova', 'npm');
-    if (!dep.version) {
-      throw new Error("ember-cordova-keyboard requires ember-platform-cordova.");
-    }
 
     var plugins = [
-      'ember cordova plugin add cordova-plugin-network-information --save',
-      'ember cordova plugin add cordova-plugin-networkactivityindicator --save'
+      'ember cdv:plugin add cordova-plugin-network-information',
+      'ember cdv:plugin add cordova-plugin-networkactivityindicator'
     ];
 
     return commandChain(plugins);
